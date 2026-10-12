@@ -7,3 +7,4 @@ zen-browser-bin
 pipes.sh
 cbonsai
 pokeget
+ttfe
