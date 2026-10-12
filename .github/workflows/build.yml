@@ -26,7 +26,7 @@ jobs:
 
       - name: Setup builder user & disable debug packages
         run: |
-          pacman -Syu --noconfirm --needed base-devel git sudo github-cli jq
+          pacman -Syu --noconfirm --needed base-devel git sudo github-cli jq curl
 
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
@@ -43,25 +43,26 @@ jobs:
             rm -rf /tmp/yay-bin
           '
 
-      - name: Download existing repository files
+      - name: Download existing database
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /repo
 
-          # Tải database cũ về trước để giữ metadata
-          gh release download packages -p "${REPO_NAME}.db.tar.gz" -D /repo --clobber || true
-          gh release download packages -p "${REPO_NAME}.files.tar.gz" -D /repo --clobber || true
+          # Tải trực tiếp file database cũ bằng curl (tránh lỗi pattern match của gh release)
+          DB_URL="https://github.com/${{ github.repository }}/releases/download/packages/${REPO_NAME}.db.tar.gz"
+          FILES_URL="https://github.com/${{ github.repository }}/releases/download/packages/${REPO_NAME}.files.tar.gz"
 
-          # Tải toàn bộ packages hiện có trên Release về /repo
-          gh release download packages -p "*.pkg.tar.zst" -D /repo --clobber || true
+          curl -fsSL "$DB_URL" -o "/repo/${REPO_NAME}.db.tar.gz" || echo "Chưa có database cũ, sẽ khởi tạo mới."
+          curl -fsSL "$FILES_URL" -o "/repo/${REPO_NAME}.files.tar.gz" || true
 
-          # Xóa các file debug cũ nếu có lọt vào
-          rm -f /repo/*-debug-*.pkg.tar.zst
-
-          echo "::group::Existing assets in /repo before build"
-          ls -la /repo
-          echo "::endgroup::"
+          # Tạo symlink tương ứng nếu tải thành công file .tar.gz
+          if [ -f "/repo/${REPO_NAME}.db.tar.gz" ]; then
+            ln -sf "${REPO_NAME}.db.tar.gz" "/repo/${REPO_NAME}.db"
+          fi
+          if [ -f "/repo/${REPO_NAME}.files.tar.gz" ]; then
+            ln -sf "${REPO_NAME}.files.tar.gz" "/repo/${REPO_NAME}.files"
+          fi
 
           chown -R builder:builder /repo
 
@@ -88,7 +89,7 @@ jobs:
             cd /build
             yay -S --aur --noconfirm --needed --rebuild --builddir /build "$pkg"
 
-            # Thu thập các file gói chính vào /repo, bỏ qua gói debug
+            # Chỉ copy các gói chính vừa build vào /repo, bỏ qua gói debug
             find /build -type f -name '*.pkg.tar.zst' ! -name '*-debug-*.pkg.tar.zst' -exec cp -u {} /repo/ \;
             echo "::endgroup::"
           done < /tmp/pkg_list.txt
@@ -102,12 +103,16 @@ jobs:
           cd /repo
           rm -f *-debug-*.pkg.tar.zst
 
-          if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
-            # Quét toàn bộ các gói hiện có trong /repo để nạp vào database
-            repo-add -R "${REPO_NAME}.db.tar.gz" *.pkg.tar.zst
+          # Tìm các gói mới vừa được copy vào /repo trong lần chạy này
+          NEW_PKGS=$(ls *.pkg.tar.zst 2>/dev/null || true)
+
+          if [ -n "$NEW_PKGS" ]; then
+            echo "Cập nhật database với các gói mới: $NEW_PKGS"
+            # repo-add sẽ thêm/cập nhật các gói mới vào database hiện có mà không làm mất các gói cũ
+            repo-add -R "${REPO_NAME}.db.tar.gz" $NEW_PKGS
           fi
 
-          # Dọn sạch các file backup .old do repo-add sinh ra để không bị upload lên Release
+          # Dọn dẹp file backup .old để tránh upload thừa
           rm -f /repo/*.old
 
       - name: Clean up outdated package assets from Release
@@ -117,11 +122,9 @@ jobs:
           cd /repo
           ASSETS=$(gh api repos/${{ github.repository }}/releases/tags/packages --jq '.assets.[].name' 2>/dev/null || echo "")
 
-          # Duyệt qua các gói có trong /repo để xóa các asset cũ hơn trên Release
           for new_pkg in *.pkg.tar.zst; do
             [ -f "$new_pkg" ] || continue
 
-            # Tách lấy tên package gốc (loại bỏ -version-pkgrel-arch.pkg.tar.zst)
             pkgname=$(echo "$new_pkg" | sed -E 's/-[^-]+-[0-9]+-[^-]+\.pkg\.tar\.zst$//')
 
             for asset in $ASSETS; do
