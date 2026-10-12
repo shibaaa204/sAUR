@@ -1,0 +1,115 @@
+name: Build & Release Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      packages:
+        description: 'JSON array of packages to build'
+        required: false
+        default: '[]'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup builder user & AUR helper (yay)
+        run: |
+          pacman -Syu --noconfirm --needed base-devel git sudo github-cli jq
+
+          useradd -m builder
+          echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
+
+          # Cài đặt yay-bin để giải quyết phụ thuộc AUR
+          su builder -c '
+            cd /tmp
+            git clone https://aur.archlinux.org/yay-bin.git
+            cd yay-bin
+            makepkg -si --noconfirm
+            rm -rf /tmp/yay-bin
+          '
+
+      - name: Download existing repository files
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p /repo
+          REPO_NAME="custom-repo"
+
+          gh release download packages -p "${REPO_NAME}.db.tar.gz" -D /repo || true
+          gh release download packages -p "${REPO_NAME}.files.tar.gz" -D /repo || true
+          chown -R builder:builder /repo
+
+      - name: Build packages
+        run: |
+          INPUT_PKGS='${{ github.event.inputs.packages }}'
+          if [ -n "$INPUT_PKGS" ] && [ "$INPUT_PKGS" != "[]" ]; then
+            PKGS=$(echo "$INPUT_PKGS" | jq -r '.[]')
+          else
+            PKGS=$(grep -v '^[[:space:]]*#' packages.txt | grep -v '^[[:space:]]*$')
+          fi
+
+          mkdir -p /build
+          chown -R builder:builder /build /repo
+
+          su builder -c "
+            for pkg in $PKGS; do
+              echo '::group::Building \$pkg'
+
+              cd /repo
+              if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
+                repo-add -R custom-repo.db.tar.gz *.pkg.tar.zst
+              fi
+
+              cd /build
+              yay -S --aur --noconfirm --needed --rebuild --builddir /build \"\$pkg\"
+
+              find /build -type f -name '*.pkg.tar.zst' -exec cp -u {} /repo/ \;
+              echo '::endgroup::'
+            done
+          "
+
+      - name: Update repository database
+        run: |
+          REPO_NAME="custom-repo"
+          cd /repo
+          if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
+            repo-add -R "${REPO_NAME}.db.tar.gz" *.pkg.tar.zst
+          fi
+
+      - name: Clean up outdated package assets from Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd /repo
+          ASSETS=$(gh api repos/${{ github.repository }}/releases/tags/packages --jq '.assets.[].name' 2>/dev/null || echo "")
+
+          for new_pkg in *.pkg.tar.zst; do
+            [ -f "$new_pkg" ] || continue
+
+            pkgname=$(echo "$new_pkg" | sed -E 's/-[^-]+-[0-9]+-[^-]+\.pkg\.tar\.zst$//')
+
+            for asset in $ASSETS; do
+              if [[ "$asset" =~ ^${pkgname}-.*\.pkg\.tar\.zst$ ]] && [ "$asset" != "$new_pkg" ]; then
+                echo "Removing outdated release asset: $asset"
+                gh release delete-asset packages "$asset" --yes || true
+              fi
+            done
+          done
+
+      - name: Upload packages & database to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: packages
+          name: "Packages Repository"
+          files: /repo/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
