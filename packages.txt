@@ -5,3 +5,4 @@ genymotion
 google-chrome
 zen-browser-bin
 pipes.sh
+cbonsai
