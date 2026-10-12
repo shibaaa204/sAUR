@@ -6,3 +6,4 @@ google-chrome
 zen-browser-bin
 pipes.sh
 cbonsai
+pokeget
