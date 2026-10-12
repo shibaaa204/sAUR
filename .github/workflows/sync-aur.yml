@@ -70,11 +70,11 @@ jobs:
           fi
 
       - name: Trigger Build Workflow
-        if: steps:check.outputs.has_updates == 'true'
+        if: steps.check.outputs.has_updates == 'true'
         uses: actions/github-script@v7
         with:
           script: |
-            const pkgs = ${{ steps:check.outputs.pkgs }};
+            const pkgs = ${{ steps.check.outputs.pkgs }};
             await github.rest.actions.createWorkflowDispatch({
               owner: context.repo.owner,
               repo: context.repo.repo,
