@@ -58,31 +58,39 @@ jobs:
         run: |
           INPUT_PKGS='${{ github.event.inputs.packages }}'
           if [ -n "$INPUT_PKGS" ] && [ "$INPUT_PKGS" != "[]" ]; then
-            PKGS=$(echo "$INPUT_PKGS" | jq -r '.[]')
+            echo "$INPUT_PKGS" | jq -r '.[]' > /tmp/pkg_list.txt
           else
-            PKGS=$(grep -v '^[[:space:]]*#' packages.txt | grep -v '^[[:space:]]*$')
+            grep -v '^[[:space:]]*#' packages.txt | grep -v '^[[:space:]]*$' > /tmp/pkg_list.txt || true
           fi
 
           mkdir -p /build
-          chown -R builder:builder /build /repo
+          chown -R builder:builder /build /repo /tmp/pkg_list.txt
 
-          su builder -c "
-            for pkg in $PKGS; do
-              echo '::group::Building \$pkg'
+          # Viết script build riêng để tránh lỗi escape dấu ngoặc kép khi su sang user builder
+          cat << 'EOF' > /build/run_build.sh
+          #!/usr/bin/env bash
+          set -e
 
-              cd /repo
-              if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
-                repo-add -R \"${REPO_NAME}.db.tar.gz\" *.pkg.tar.zst
-              fi
+          while IFS= read -r pkg || [ -n "$pkg" ]; do
+            [ -z "$pkg" ] && continue
+            echo "::group::Building $pkg"
 
-              cd /build
-              yay -S --aur --noconfirm --needed --rebuild --builddir /build \"\$pkg\"
+            cd /repo
+            if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
+              repo-add -R "${REPO_NAME}.db.tar.gz" *.pkg.tar.zst
+            fi
 
-              # Chỉ lấy các gói chính, bỏ qua gói debug
-              find /build -type f -name '*.pkg.tar.zst' ! -name '*-debug-*.pkg.tar.zst' -exec cp -u {} /repo/ \;
-              echo '::endgroup::'
-            done
-          "
+            cd /build
+            yay -S --aur --noconfirm --needed --rebuild --builddir /build "$pkg"
+
+            # Chỉ lấy các gói chính, bỏ qua gói debug
+            find /build -type f -name '*.pkg.tar.zst' ! -name '*-debug-*.pkg.tar.zst' -exec cp -u {} /repo/ \;
+            echo "::endgroup::"
+          done < /tmp/pkg_list.txt
+          EOF
+
+          chmod +x /build/run_build.sh
+          su builder -c "/build/run_build.sh"
 
       - name: Update repository database
         run: |
