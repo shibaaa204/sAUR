@@ -4,3 +4,4 @@ fcitx5-lotus-bin
 genymotion
 google-chrome
 zen-browser-bin
+pipes.sh
