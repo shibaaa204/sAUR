@@ -11,6 +11,9 @@ on:
 permissions:
   contents: write
 
+env:
+  REPO_NAME: "sAUR"
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -21,14 +24,17 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup builder user & AUR helper (yay)
+      - name: Setup builder user & disable debug packages
         run: |
           pacman -Syu --noconfirm --needed base-devel git sudo github-cli jq
 
           useradd -m builder
           echo "builder ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers
 
-          # Cài đặt yay-bin để giải quyết phụ thuộc AUR
+          # Tắt sinh gói debug trong makepkg.conf
+          sed -i 's/\bdebug\b/!debug/g' /etc/makepkg.conf
+
+          # Cài yay-bin để tự xử lý dependency AUR
           su builder -c '
             cd /tmp
             git clone https://aur.archlinux.org/yay-bin.git
@@ -42,8 +48,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           mkdir -p /repo
-          REPO_NAME="custom-repo"
 
+          # Tải release database cũ về (nếu có)
           gh release download packages -p "${REPO_NAME}.db.tar.gz" -D /repo || true
           gh release download packages -p "${REPO_NAME}.files.tar.gz" -D /repo || true
           chown -R builder:builder /repo
@@ -66,22 +72,25 @@ jobs:
 
               cd /repo
               if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
-                repo-add -R custom-repo.db.tar.gz *.pkg.tar.zst
+                repo-add -R \"${REPO_NAME}.db.tar.gz\" *.pkg.tar.zst
               fi
 
               cd /build
               yay -S --aur --noconfirm --needed --rebuild --builddir /build \"\$pkg\"
 
-              find /build -type f -name '*.pkg.tar.zst' -exec cp -u {} /repo/ \;
+              # Chỉ lấy các gói chính, bỏ qua gói debug
+              find /build -type f -name '*.pkg.tar.zst' ! -name '*-debug-*.pkg.tar.zst' -exec cp -u {} /repo/ \;
               echo '::endgroup::'
             done
           "
 
       - name: Update repository database
         run: |
-          REPO_NAME="custom-repo"
           cd /repo
+          rm -f *-debug-*.pkg.tar.zst
+
           if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
+            # Cờ -R tự động xóa entry version cũ khỏi file database
             repo-add -R "${REPO_NAME}.db.tar.gz" *.pkg.tar.zst
           fi
 
@@ -90,16 +99,20 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd /repo
+          # Lấy danh sách asset đang có trên Release
           ASSETS=$(gh api repos/${{ github.repository }}/releases/tags/packages --jq '.assets.[].name' 2>/dev/null || echo "")
 
+          # Duyệt qua các gói vừa build
           for new_pkg in *.pkg.tar.zst; do
             [ -f "$new_pkg" ] || continue
 
+            # Tách lấy tên package gốc (loại bỏ -version-pkgrel-arch.pkg.tar.zst)
             pkgname=$(echo "$new_pkg" | sed -E 's/-[^-]+-[0-9]+-[^-]+\.pkg\.tar\.zst$//')
 
             for asset in $ASSETS; do
+              # Nếu asset trùng tên package nhưng khác chuỗi file mới -> đó là bản cũ cần xóa
               if [[ "$asset" =~ ^${pkgname}-.*\.pkg\.tar\.zst$ ]] && [ "$asset" != "$new_pkg" ]; then
-                echo "Removing outdated release asset: $asset"
+                echo "Xóa asset phiên bản cũ: $asset"
                 gh release delete-asset packages "$asset" --yes || true
               fi
             done
