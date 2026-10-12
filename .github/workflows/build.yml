@@ -49,9 +49,12 @@ jobs:
         run: |
           mkdir -p /repo
 
-          # Tải release database cũ về (nếu có)
-          gh release download packages -p "${REPO_NAME}.db.tar.gz" -D /repo || true
-          gh release download packages -p "${REPO_NAME}.files.tar.gz" -D /repo || true
+          # Tải toàn bộ packages (.pkg.tar.zst) và database hiện có trên Release về /repo
+          gh release download packages -D /repo --clobber || true
+
+          # Loại bỏ các file debug cũ nếu có sót lại từ các lần build trước
+          rm -f /repo/*-debug-*.pkg.tar.zst
+
           chown -R builder:builder /repo
 
       - name: Build packages
@@ -75,15 +78,10 @@ jobs:
             [ -z "$pkg" ] && continue
             echo "::group::Building $pkg"
 
-            cd /repo
-            if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
-              repo-add -R "${REPO_NAME}.db.tar.gz" *.pkg.tar.zst
-            fi
-
             cd /build
             yay -S --aur --noconfirm --needed --rebuild --builddir /build "$pkg"
 
-            # Chỉ lấy các gói chính, bỏ qua gói debug
+            # Thu thập các file gói chính vào /repo, bỏ qua gói debug
             find /build -type f -name '*.pkg.tar.zst' ! -name '*-debug-*.pkg.tar.zst' -exec cp -u {} /repo/ \;
             echo "::endgroup::"
           done < /tmp/pkg_list.txt
@@ -98,7 +96,7 @@ jobs:
           rm -f *-debug-*.pkg.tar.zst
 
           if ls *.pkg.tar.zst 1> /dev/null 2>&1; then
-            # Cờ -R tự động xóa entry version cũ khỏi file database
+            # Quét toàn bộ các gói hiện có trong /repo để nạp vào database
             repo-add -R "${REPO_NAME}.db.tar.gz" *.pkg.tar.zst
           fi
 
@@ -110,7 +108,7 @@ jobs:
           # Lấy danh sách asset đang có trên Release
           ASSETS=$(gh api repos/${{ github.repository }}/releases/tags/packages --jq '.assets.[].name' 2>/dev/null || echo "")
 
-          # Duyệt qua các gói vừa build
+          # Duyệt qua các gói có trong /repo để xóa các asset cũ hơn trên Release
           for new_pkg in *.pkg.tar.zst; do
             [ -f "$new_pkg" ] || continue
 
@@ -118,7 +116,6 @@ jobs:
             pkgname=$(echo "$new_pkg" | sed -E 's/-[^-]+-[0-9]+-[^-]+\.pkg\.tar\.zst$//')
 
             for asset in $ASSETS; do
-              # Nếu asset trùng tên package nhưng khác chuỗi file mới -> đó là bản cũ cần xóa
               if [[ "$asset" =~ ^${pkgname}-.*\.pkg\.tar\.zst$ ]] && [ "$asset" != "$new_pkg" ]; then
                 echo "Xóa asset phiên bản cũ: $asset"
                 gh release delete-asset packages "$asset" --yes || true
