@@ -49,11 +49,19 @@ jobs:
         run: |
           mkdir -p /repo
 
-          # Tải toàn bộ packages (.pkg.tar.zst) và database hiện có trên Release về /repo
-          gh release download packages -D /repo --clobber || true
+          # Tải database cũ về trước để giữ metadata
+          gh release download packages -p "${REPO_NAME}.db.tar.gz" -D /repo --clobber || true
+          gh release download packages -p "${REPO_NAME}.files.tar.gz" -D /repo --clobber || true
 
-          # Loại bỏ các file debug cũ nếu có sót lại từ các lần build trước
+          # Tải toàn bộ packages hiện có trên Release về /repo
+          gh release download packages -p "*.pkg.tar.zst" -D /repo --clobber || true
+
+          # Xóa các file debug cũ nếu có lọt vào
           rm -f /repo/*-debug-*.pkg.tar.zst
+
+          echo "::group::Existing assets in /repo before build"
+          ls -la /repo
+          echo "::endgroup::"
 
           chown -R builder:builder /repo
 
@@ -69,7 +77,6 @@ jobs:
           mkdir -p /build
           chown -R builder:builder /build /repo /tmp/pkg_list.txt
 
-          # Viết script build riêng để tránh lỗi escape dấu ngoặc kép khi su sang user builder
           cat << 'EOF' > /build/run_build.sh
           #!/usr/bin/env bash
           set -e
@@ -100,12 +107,14 @@ jobs:
             repo-add -R "${REPO_NAME}.db.tar.gz" *.pkg.tar.zst
           fi
 
+          # Dọn sạch các file backup .old do repo-add sinh ra để không bị upload lên Release
+          rm -f /repo/*.old
+
       - name: Clean up outdated package assets from Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           cd /repo
-          # Lấy danh sách asset đang có trên Release
           ASSETS=$(gh api repos/${{ github.repository }}/releases/tags/packages --jq '.assets.[].name' 2>/dev/null || echo "")
 
           # Duyệt qua các gói có trong /repo để xóa các asset cũ hơn trên Release
