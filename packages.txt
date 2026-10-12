@@ -1,1 +1,2 @@
 hello
+greetd-dms-greeter-bin
