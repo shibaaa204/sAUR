@@ -2,7 +2,7 @@ name: Check & Sync AUR Updates
 
 on:
   schedule:
-    - cron: '23 1 * * *'
+    - cron: '12 2 * * *'
   push:
     branches:
       - main
