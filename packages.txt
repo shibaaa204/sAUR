@@ -7,5 +7,3 @@ zen-browser-bin
 pipes.sh
 cbonsai
 pokeget
-ttfe
-android_translation_layer-git
